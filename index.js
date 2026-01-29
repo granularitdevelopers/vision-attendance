@@ -48,6 +48,7 @@ class DigestClient {
     ha1.update(`${this.username}:${challenge.realm}:${this.password}`);
     const ha1Hex = ha1.digest("hex");
 
+    // For ha2, use the full path including query string
     const ha2 = crypto.createHash("md5");
     ha2.update(`${method}:${path}`);
     const ha2Hex = ha2.digest("hex");
@@ -82,15 +83,22 @@ class DigestClient {
   }
 
   buildAuthHeader(challenge, method, path) {
+    // Use full path for URI in Authorization header
+    const uri = path;
     const authData = this.generateResponse(challenge, method, path);
     
     const params = [
       `username="${this.username}"`,
       `realm="${challenge.realm}"`,
       `nonce="${challenge.nonce}"`,
-      `uri="${path}"`,
+      `uri="${uri}"`,
       `response="${authData.response}"`
     ];
+    
+    // Add algorithm if specified in challenge
+    if (challenge.algorithm) {
+      params.push(`algorithm=${challenge.algorithm}`);
+    }
 
     if (challenge.opaque) {
       params.push(`opaque="${challenge.opaque}"`);
@@ -116,7 +124,10 @@ class DigestClient {
         port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
         path: path,
         method: method,
-        headers: options.headers || {}
+        headers: {
+          "User-Agent": "Node.js Digest Client",
+          ...options.headers
+        }
       };
 
       // First request - may get 401 with challenge
@@ -133,12 +144,17 @@ class DigestClient {
             const challenge = this.parseChallenge(res.headers["www-authenticate"]);
             
             if (!challenge) {
+              console.error("Failed to parse challenge:", res.headers["www-authenticate"]);
               reject(new Error("Invalid digest authentication challenge"));
               return;
             }
 
+            console.log("Parsed challenge:", challenge);
+            
             // Retry request with authentication
             const authHeader = this.buildAuthHeader(challenge, method, path);
+            console.log("Authorization header:", authHeader);
+            
             requestOptions.headers = {
               ...requestOptions.headers,
               Authorization: authHeader
@@ -152,6 +168,14 @@ class DigestClient {
               });
 
               authRes.on("end", () => {
+                if (authRes.statusCode === 501) {
+                  console.error("Server returned 501 Not Implemented");
+                  console.error("Request path:", path);
+                  console.error("Request method:", method);
+                  console.error("Response:", authData);
+                  console.error("Response headers:", authRes.headers);
+                  console.error("Auth Header:", authHeader);
+                }
                 resolve({
                   text: () => Promise.resolve(authData),
                   status: authRes.statusCode,
@@ -189,8 +213,8 @@ class DigestClient {
 const client = new DigestClient(USERNAME, PASSWORD);
 
 // Helper function to make digest-authenticated requests
-function makeRequest(url) {
-  return client.request(url);
+function makeRequest(url, options = {}) {
+  return client.request(url, options);
 }
 
 
@@ -204,10 +228,16 @@ app.get("/device-info", async (req, res) => {
    );
 
    const text = await response.text();
-   res.send(text);
+   
+   if (response.status === 501) {
+     console.error("501 Not Implemented - Response:", text);
+     return res.status(501).json({ error: "Not Implemented", details: text });
+   }
+   
+   res.status(response.status).send(text);
  } catch (err) {
-   console.error(err);
-   res.status(500).json({ error: "Failed to connect to device" });
+   console.error("Error:", err);
+   res.status(500).json({ error: "Failed to connect to device", details: err.message });
  }
 });
 
@@ -219,12 +249,61 @@ app.get("/users", async (req, res) => {
       );
   
       const text = await response.text();
-      res.send(text);
+      
+      if (response.status === 501) {
+        console.error("501 Not Implemented - Response:", text);
+        return res.status(501).json({ error: "Not Implemented", Details: text });
+      }
+      
+      res.status(response.status).send(text);
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Failed to fetch users" });
+      console.error("Error:", err);
+      res.status(500).json({ error: "Failed to fetch users", Details: err.message });
     }
   });
+
+
+/**
+ * Open the door
+ */
+app.get("/open-door", async (req, res) => {
+  try {
+    const endpoint = `/cgi-bin/accessControl.cgi?action=openDoor&channel=1`;
+    const fullUrl = `${BASE_URL}${endpoint}`;
+    
+    console.log(`[OPEN DOOR] Request received - Opening door via ${fullUrl}`);
+    
+    const response = await makeRequest(fullUrl);
+    const text = await response.text();
+    
+    console.log(`[OPEN DOOR] Status: ${response.status}, Response: ${text.substring(0, 200)}`);
+    
+    if (response.ok) {
+      console.log(`[OPEN DOOR] ✓ SUCCESS! Door opened successfully`);
+      return res.status(200).json({ 
+        success: true, 
+        message: "Door opened successfully",
+        response: text,
+        endpoint: endpoint
+      });
+    }
+    
+    console.error(`[OPEN DOOR] ✗ FAILED - Status: ${response.status}`);
+    res.status(response.status).json({
+      success: false,
+      error: "Failed to open door",
+      response: text,
+      endpoint: endpoint
+    });
+  } catch (err) {
+    console.error("[OPEN DOOR] Error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to open door", 
+      Details: err.message 
+    });
+  }
+});
 
 
 // start server
