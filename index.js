@@ -2,6 +2,7 @@ import express from "express";
 import http from "http";
 import { URL } from "url";
 import crypto from "crypto";
+import { groupByUser, parseRecords } from "./app/records_service.js";
 
 const app = express();
 const PORT = 8008;
@@ -300,6 +301,120 @@ app.get("/open-door", async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: "Failed to open door", 
+      Details: err.message 
+    });
+  }
+});
+
+
+/**
+ * Get offline access records from device
+ * Query parameters:
+ * - StartTime: Start time for search (default: 123456700)
+ * - EndTime: End time for search (default: 12345680)
+ */
+app.get("/records", async (req, res) => {
+  try {
+    const startTime = 1769644800;
+    const endTime = 1769731199;
+
+    //const startTime = req.query.StartTime || "1769731200";
+    //const endTime = req.query.EndTime || "1769817599";
+    
+    const endpoint = `/cgi-bin/recordFinder.cgi?action=find&name=AccessControlCardRec&StartTime=${startTime}&EndTime=${endTime}`;
+    const fullUrl = `${BASE_URL}${endpoint}`;
+    
+    console.log(`[RECORDS] Request received - Finding records from ${startTime} to ${endTime}`);
+    console.log(`[RECORDS] Calling: ${fullUrl}`);
+    
+    const response = await makeRequest(fullUrl);
+    const text = await response.text();
+
+    const json = parseRecords(text);
+
+    let records = json.records.filter(record => record.CardName != "" && record.CardName != "Other");
+    records = records.map(record => ({
+      ...record,
+      CreateTime: new Date(record.CreateTime * 1000).toISOString()
+    }));
+
+    let attendance = groupByUser(records);
+    
+    console.log(`[RECORDS] Status: ${response.status}, Response length: ${text.length}`);
+    
+    if (response.ok) {
+      console.log(`[RECORDS] ✓ SUCCESS! Records retrieved`);
+      return res.status(200).json({ 
+        success: true, 
+        message: "Records retrieved successfully",
+        response: attendance,
+        endpoint: endpoint
+      });
+    }
+    
+    console.error(`[RECORDS] ✗ FAILED - Status: ${response.status}`);
+    res.status(response.status).json({
+      success: false,
+      error: "Failed to retrieve records",
+      response: text,
+      endpoint: endpoint
+    });
+  } catch (err) {
+    console.error("[RECORDS] Error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to retrieve records", 
+      Details: err.message 
+    });
+  }
+});
+
+
+/**
+ * Register for AccessControl events
+ * Query parameters:
+ * - heartbeat: Heartbeat interval in seconds (default: 5)
+ * - Events: Event types to subscribe to (default: AccessControl)
+ */
+app.get("/events", async (req, res) => {
+  try {
+    const heartbeat = req.query.heartbeat || "5";
+    const events = req.query.Events || "AccessControl";
+    
+    const endpoint = `/cgi-bin/snapManager.cgi?action=attachFileProc&Flags[0]=Event&Events=[${events}]&heartbeat=${heartbeat}`;
+    const fullUrl = `${BASE_URL}${endpoint}`;
+    
+    console.log(`[EVENTS] Request received - Registering for events: ${events}, heartbeat: ${heartbeat}`);
+    console.log(`[EVENTS] Calling: ${fullUrl}`);
+    
+    // Set headers for event streaming
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    const response = await makeRequest(fullUrl);
+    const text = await response.text();
+    
+    console.log(`[EVENTS] Status: ${response.status}, Response length: ${text.length}`);
+    
+    if (response.ok) {
+      console.log(`[EVENTS] ✓ SUCCESS! Event stream registered`);
+      // Stream the response back to the client
+      res.status(200).send(text);
+    } else {
+      console.error(`[EVENTS] ✗ FAILED - Status: ${response.status}`);
+      res.status(response.status).json({
+        success: false,
+        error: "Failed to register for events",
+        response: text,
+        endpoint: endpoint
+      });
+    }
+  } catch (err) {
+    console.error("[EVENTS] Error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to register for events", 
       Details: err.message 
     });
   }
